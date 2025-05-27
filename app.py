@@ -549,8 +549,8 @@ class GrokApiClient:
                     **DEFAULT_HEADERS,
                     "Cookie": cookie,
                     # --- 开始添加 ---
-                    "x-statsig-id": str(uuid.uuid4()),  # 或固定值
-                    "x-xai-request-id": str(uuid.uuid4())
+                    "x-statsig-id": "WIDGMel2xEiJZbnoTqS3W/B02EPkxEWkyB98NKo6Reimq0UPvcexzmua2vAE6h4FQoiwvVvj3282mZfHDtNQsHjRhP17Ww",  # 或固定值
+                    "x-xai-request-id": "bb7b6cff-a865-41b0-8e00-37df020316d4"
                     # --- 结束添加 ---
                 },
                 json=upload_data,
@@ -598,8 +598,8 @@ class GrokApiClient:
                     **DEFAULT_HEADERS,
                     "Cookie": CONFIG["SERVER"]['COOKIE'],
                     # --- 开始添加 ---
-                    "x-statsig-id": str(uuid.uuid4()),  # 或固定值
-                    "x-xai-request-id": str(uuid.uuid4())
+                    "x-statsig-id": "WIDGMel2xEiJZbnoTqS3W/B02EPkxEWkyB98NKo6Reimq0UPvcexzmua2vAE6h4FQoiwvVvj3282mZfHDtNQsHjRhP17Ww",  # 或固定值
+                    "x-xai-request-id": "bb7b6cff-a865-41b0-8e00-37df020316d4"
                     # --- 结束添加 ---
                 },
                 json=upload_data,
@@ -1236,8 +1236,8 @@ def chat_completions():
                         **DEFAULT_HEADERS,
                         "Cookie": CONFIG["SERVER"]['COOKIE'],
                         # --- 开始添加 ---
-                        "x-statsig-id": str(uuid.uuid4()),  # 或者您捕获到的固定值
-                        "x-xai-request-id": str(uuid.uuid4())
+                        "x-statsig-id": "WIDGMel2xEiJZbnoTqS3W/B02EPkxEWkyB98NKo6Reimq0UPvcexzmua2vAE6h4FQoiwvVvj3282mZfHDtNQsHjRhP17Ww",  # 或者您捕获到的固定值
+                        "x-xai-request-id": "bb7b6cff-a865-41b0-8e00-37df020316d4"
                         # --- 结束添加 ---
                     },
                     data=json.dumps(request_payload),
