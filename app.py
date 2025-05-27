@@ -547,7 +547,11 @@ class GrokApiClient:
                 "https://grok.com/rest/app-chat/upload-file",
                 headers={
                     **DEFAULT_HEADERS,
-                    "Cookie":cookie
+                    "Cookie": cookie,
+                    # --- 开始添加 ---
+                    "x-statsig-id": str(uuid.uuid4()),  # 或固定值
+                    "x-xai-request-id": str(uuid.uuid4())
+                    # --- 结束添加 ---
                 },
                 json=upload_data,
                 impersonate="chrome133a",
@@ -592,7 +596,11 @@ class GrokApiClient:
                 url,
                 headers={
                     **DEFAULT_HEADERS,
-                    "Cookie":CONFIG["SERVER"]['COOKIE']
+                    "Cookie": CONFIG["SERVER"]['COOKIE'],
+                    # --- 开始添加 ---
+                    "x-statsig-id": str(uuid.uuid4()),  # 或固定值
+                    "x-xai-request-id": str(uuid.uuid4())
+                    # --- 结束添加 ---
                 },
                 json=upload_data,
                 impersonate="chrome133a",
@@ -1225,9 +1233,17 @@ def chat_completions():
                 response = curl_requests.post(
                     f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
                     headers={
-                        **DEFAULT_HEADERS, 
-                        "Cookie":CONFIG["SERVER"]['COOKIE']
+                        **DEFAULT_HEADERS,
+                        "Cookie": CONFIG["SERVER"]['COOKIE'],
+                        # --- 开始添加 ---
+                        "x-statsig-id": str(uuid.uuid4()),  # 或者您捕获到的固定值
+                        "x-xai-request-id": str(uuid.uuid4())
+                        # --- 结束添加 ---
                     },
+                    data=json.dumps(request_payload),
+                    impersonate="chrome133a",
+                    stream=True,
+                    **proxy_options)
                     data=json.dumps(request_payload),
                     impersonate="chrome133a",
                     stream=True,
