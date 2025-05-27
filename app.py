@@ -1243,11 +1243,8 @@ def chat_completions():
                     data=json.dumps(request_payload),
                     impersonate="chrome133a",
                     stream=True,
-                    **proxy_options)
-                    data=json.dumps(request_payload),
-                    impersonate="chrome133a",
-                    stream=True,
-                    **proxy_options)
+                    **proxy_options
+                )
                 logger.info(CONFIG["SERVER"]['COOKIE'],"Server")
                 if response.status_code == 200:
                     response_status_code = 200
