@@ -9,18 +9,14 @@ import secrets
 from loguru import logger
 from pathlib import Path
 
-import requests # Standard requests, used by StatsigIDGenerator and PicGo/TUMY
+import requests # For PicGo/TUMY and get_statsig_id
 from flask import Flask, request, Response, jsonify, stream_with_context, render_template, redirect, session
-from curl_cffi import requests as curl_requests # Specific for Grok API calls
+from curl_cffi import requests as curl_requests
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-# <<< STATSIG INTEGRATION START >>>
-import struct
-import hashlib
-import random # ensure this is here, StatsigIDGenerator uses it
-from bs4 import BeautifulSoup # StatsigIDGenerator uses this
-# <<< STATSIG INTEGRATION END >>>
-
+import struct # New import for statsig_id generation
+import hashlib # New import for statsig_id generation
+import random # New import for statsig_id generation
 
 class Logger:
     def __init__(self, level="INFO", colorize=True, format=None):
@@ -117,7 +113,7 @@ CONFIG = {
     },
     "ADMIN": {
         "MANAGER_SWITCH": os.environ.get("MANAGER_SWITCH") or None,
-        "PASSWORD": os.environ.get("ADMINPASSWORD") or None  
+        "PASSWORD": os.environ.get("ADMINPASSWORD") or None
     },
     "SERVER": {
         "COOKIE": None,
@@ -155,123 +151,6 @@ DEFAULT_HEADERS = {
     'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
 }
 
-# <<< STATSIG INTEGRATION START >>>
-class StatsigIDGenerator:
-    def __init__(self):
-        self.base_timestamp = 1682924400
-        # 使用从解码的ID中提取的meta_content
-        self.default_meta_content = bytes.fromhex("30902da2569a6aa4b92bae5a1fb941ac30791cb9130dda57476bb7646d15a263dbfc84103acb2644c83e4ddb2451734d")
-        
-    def get_meta_content(self):
-        """获取或生成 48 字节的 meta content"""
-        if self.default_meta_content:
-            return self.default_meta_content
-            
-        # 尝试从实际网站获取
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
-            }
-            # Using the global `requests` which is the standard library version
-            response = requests.get('https://grok.com', headers=headers, timeout=5)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                meta_tag = soup.find('meta', {'name': 'grok-site-verification'})
-                if meta_tag and meta_tag.get('content'):
-                    decoded = base64.b64decode(meta_tag['content'])
-                    if len(decoded) >= 48:
-                        return decoded[:48]
-        except:
-            pass # Fallback to random generation or pre-defined if an error occurs
-        
-        # 使用基于已知ID分析的模式生成
-        # 从分析中发现 meta content 有特定的模式
-        meta = bytearray(48)
-        # 填充一些看起来合理的字节
-        for i in range(48):
-            if i < 16:
-                meta[i] = random.randint(0x20, 0x7E)  # 可打印字符范围
-            elif i < 32:
-                meta[i] = random.randint(0x80, 0xFF)  # 高位字节
-            else:
-                meta[i] = random.randint(0x00, 0xFF)  # 任意字节
-        
-        return bytes(meta)
-    
-    def generate_fingerprint_hash(self, method, pathname, timestamp):
-        """生成更真实的指纹哈希"""
-        # 基础字符串格式
-        base_string = f"{method}!{pathname}!{timestamp}"
-        
-        # 更详细的指纹信息
-        fingerprint_components = [
-            "screen:2560x1440",
-            "colorDepth:24",
-            "pixelRatio:2",
-            "timezone:-480",
-            "language:zh-CN",
-            "platform:MacIntel",
-            "hardwareConcurrency:8",
-            "deviceMemory:8",
-            "webgl:Apple M1",
-            "canvas:true",
-            "audio:true"
-        ]
-        
-        # 组合所有信息
-        full_string = base_string + ''.join(fingerprint_components)
-        
-        # 计算 SHA256
-        hash_obj = hashlib.sha256(full_string.encode('utf-8'))
-        hash_bytes = hash_obj.digest()
-        
-        # 返回前16字节
-        return hash_bytes[:16]
-    
-    def generate_statsig_id(self, method="POST", pathname="/rest/app-chat/conversations/new", 
-                           custom_meta=None, custom_timestamp=None, custom_hash=None, 
-                           custom_fixed_byte=b'\x03', custom_xor_key=None):
-        """生成 x-statsig-id，支持自定义各个组件"""
-        # 1. 获取 meta content (48 字节)
-        meta_content = custom_meta if custom_meta else self.get_meta_content()
-        
-        # 2. 计算时间戳 (4 字节)
-        if custom_timestamp:
-            relative_timestamp = custom_timestamp
-        else:
-            current_timestamp = int(time.time())
-            relative_timestamp = current_timestamp - self.base_timestamp
-        
-        timestamp_bytes = struct.pack('<I', relative_timestamp)  # 小端序
-        
-        # 3. 生成 SHA256 哈希 (16 字节)
-        hash_bytes = custom_hash if custom_hash else self.generate_fingerprint_hash(method, pathname, relative_timestamp)
-        
-        # 4. 固定值 (1 字节) - 从分析中看到大部分是 0x03
-        fixed_byte = custom_fixed_byte
-        
-        # 5. 组合所有部分 (总共 69 字节)
-        combined = meta_content + timestamp_bytes + hash_bytes + fixed_byte
-        
-        # 6. 生成随机异或密钥 (1 字节)
-        # 从分析的ID中看到密钥范围很广
-        xor_key = custom_xor_key if custom_xor_key is not None else random.randint(0x10, 0xFF)
-        
-        # 7. 异或加密
-        encrypted = bytes([b ^ xor_key for b in combined])
-        
-        # 8. 添加密钥到开头 (总共 70 字节)
-        final_data = bytes([xor_key]) + encrypted
-        
-        # 9. Base64 编码 - 移除填充
-        statsig_id = base64.b64encode(final_data).decode('utf-8').rstrip('=')
-        
-        return statsig_id
-
-statsig_id_generator = StatsigIDGenerator() # Instantiate the generator
-# <<< STATSIG INTEGRATION END >>>
-
-
 class AuthTokenManager:
     def __init__(self):
         self.token_model_map = {}
@@ -304,13 +183,13 @@ class AuthTokenManager:
         self.token_reset_timer = None
         self.load_token_status() # 加载令牌状态
     def save_token_status(self):
-        try:        
+        try:
             with open(CONFIG["TOKEN_STATUS_FILE"], 'w', encoding='utf-8') as f:
                 json.dump(self.token_status_map, f, indent=2, ensure_ascii=False)
             logger.info("令牌状态已保存到配置文件", "TokenManager")
         except Exception as error:
             logger.error(f"保存令牌状态失败: {str(error)}", "TokenManager")
-            
+
     def load_token_status(self):
         try:
             token_status_file = Path(CONFIG["TOKEN_STATUS_FILE"])
@@ -371,7 +250,7 @@ class AuthTokenManager:
 
             if sso in self.token_status_map:
                 del self.token_status_map[sso]
-            
+
             self.save_token_status()
 
             logger.info(f"令牌已成功移除: {token}", "TokenManager")
@@ -382,33 +261,33 @@ class AuthTokenManager:
     def reduce_token_request_count(self, model_id, count):
         try:
             normalized_model = self.normalize_model_name(model_id)
-            
+
             if normalized_model not in self.token_model_map:
                 logger.error(f"模型 {normalized_model} 不存在", "TokenManager")
                 return False
-                
+
             if not self.token_model_map[normalized_model]:
                 logger.error(f"模型 {normalized_model} 没有可用的token", "TokenManager")
                 return False
-                
+
             token_entry = self.token_model_map[normalized_model][0]
-            
+
             # 确保RequestCount不会小于0
             new_count = max(0, token_entry["RequestCount"] - count)
             reduction = token_entry["RequestCount"] - new_count
-            
+
             token_entry["RequestCount"] = new_count
-            
+
             # 更新token状态
             if token_entry["token"]:
                 sso = token_entry["token"].split("sso=")[1].split(";")[0]
                 if sso in self.token_status_map and normalized_model in self.token_status_map[sso]:
                     self.token_status_map[sso][normalized_model]["totalRequestCount"] = max(
-                        0, 
+                        0,
                         self.token_status_map[sso][normalized_model]["totalRequestCount"] - reduction
                     )
             return True
-            
+
         except Exception as error:
             logger.error(f"重置校对token请求次数时发生错误: {str(error)}", "TokenManager")
             return False
@@ -592,18 +471,14 @@ class Utils:
     def organize_search_results(search_results):
         if not search_results or 'results' not in search_results:
             return ''
-
         results = search_results['results']
         formatted_results = []
-
         for index, result in enumerate(results):
             title = result.get('title', '未知标题')
             url = result.get('url', '#')
             preview = result.get('preview', '无预览内容')
-
             formatted_result = f"\r\n<details><summary>资料[{index}]: {title}</summary>\r\n{preview}\r\n\n[Link]({url})\r\n</details>"
             formatted_results.append(formatted_result)
-
         return '\n\n'.join(formatted_results)
 
     @staticmethod
@@ -614,21 +489,103 @@ class Utils:
     def get_proxy_options():
         proxy = CONFIG["API"]["PROXY"]
         proxy_options = {}
-
         if proxy:
             logger.info(f"使用代理: {proxy}", "Server")
-            
+
             if proxy.startswith("socks5://"):
                 proxy_options["proxy"] = proxy
-            
+
                 if '@' in proxy:
                     auth_part = proxy.split('@')[0].split('://')[1]
                     if ':' in auth_part:
                         username, password = auth_part.split(':')
                         proxy_options["proxy_auth"] = (username, password)
             else:
-                proxy_options["proxies"] = {"https": proxy, "http": proxy}    
+                proxy_options["proxies"] = {"https": proxy, "http": proxy}
         return proxy_options
+
+    @staticmethod
+    def generate_statsig_id():
+        """生成符合格式的 x-statsig-id"""
+        try:
+            # 1. 生成48字节的meta content
+            meta_templates = [
+                bytes.fromhex("30902da2569a6aa4b92bae5a1fb941ac30791cb9130dda57476bb7646d15a263dbfc84103acb2644c83e4ddb2451734d"),
+                bytes.fromhex("40a02db3679b7bb5ca3cbf6b2fca52bd41892dca241eeb68587cc8757e26b374ecfd95214bdc3755d94f5eec3562845e"),
+                bytes.fromhex("50b03ec4789c8cc6db4dc07c3fdb63ce52993edb352ffc79698dd9868f37c485fdfea6325ced4866ea5f6ffd4673956f") # Corrected hex string
+            ]
+
+            # 随机选择一个模板或生成新的
+            if random.random() < 0.7:  # 70%的概率使用模板
+                meta_content = random.choice(meta_templates)
+            else:
+                # 生成随机的48字节
+                meta_content = bytes([random.randint(0, 255) for _ in range(48)])
+
+            # 2. 生成时间戳（4字节）
+            current_timestamp = int(time.time())
+            relative_timestamp = current_timestamp - 1682924400
+            timestamp_bytes = struct.pack('<I', relative_timestamp)  # 小端序
+
+            # 3. 生成SHA256片段（16字节）
+            # 模拟指纹信息的哈希
+            fingerprint_data = f"POST!/rest/app-chat/conversations/new!{relative_timestamp}"
+            fingerprint_data += "screen:2560x1440,platform:MacIntel,language:zh-CN"
+            hash_obj = hashlib.sha256(fingerprint_data.encode('utf-8'))
+            hash_bytes = hash_obj.digest()[:16]
+
+            # 4. 固定值（1字节）
+            fixed_byte = b'\x03'
+
+            # 5. 组合所有部分（69字节）
+            combined = meta_content + timestamp_bytes + hash_bytes + fixed_byte
+
+            # 6. 生成随机异或密钥（1字节）
+            xor_key = random.randint(0x10, 0xF0)
+
+            # 7. 异或加密
+            encrypted = bytes([b ^ xor_key for b in combined])
+
+            # 8. 添加密钥到开头（总共70字节）
+            final_data = bytes([xor_key]) + encrypted
+
+            # 9. Base64编码
+            statsig_id = base64.b64encode(final_data).decode('utf-8')
+
+            # 移除padding（如果有）
+            statsig_id = statsig_id.rstrip('=')
+
+            return statsig_id
+
+        except Exception as e:
+            logger.error(f"生成 statsig id 时发生错误: {str(e)}", "Utils")
+            # 返回一个已知有效的ID作为后备
+            fallback_ids = [
+                "FiaGO7RAjHyyrz24TAmvV7ombwqvBRvMQVF9oXJ7A7R1zeqSBizdMFLeKFvNMkdlW2ov8RWn675EmkrfoV8U08Oi9tMkFQ",
+                "799/wk25dYVLVsRBtfBWrkPflvNW/OI1uKiEWIuC+k2MNBNr/9Ukyasn0aI0y76cohjWCOwsSQjx0BhUxzH1LAarvhxP7A",
+                "xfVV6GeTX69hfO5rn9p8hGn1vNl81sgfkoKucqGo0GemHjlB1f8O44EN+4ge4ZS2iBeRIsaPUtakrUDHhmP8urJomXb4xg",
+                "Lx+/Ao15tUWLlgSBdTCWboMfVjOWPCL1eGhEmEtCOo1M9NOrPxXkCWvnEWL0C35cYnERyCxEF1ZQ8vVf1jv/7IdmtV4bLA"
+            ]
+            return random.choice(fallback_ids)
+
+    @staticmethod
+    def get_statsig_id():
+        """获取 statsig id - 优先尝试API，失败则本地生成"""
+        try:
+            # 先尝试从API获取
+            response = requests.get("https://grok-statsig.vercel.app/get_grok_statsig", timeout=3)
+            if response.status_code == 200:
+                data = response.json()
+                # Check if 'id' key exists and is not empty or None
+                statsig_id_from_api = data.get("id")
+                if statsig_id_from_api: 
+                    return statsig_id_from_api
+        except Exception as e: # Catch specific exceptions if possible, e.g., requests.exceptions.RequestException
+            logger.warning(f"从API获取statsig_id失败: {str(e)}. 将本地生成.", "Utils")
+            pass # Fall through to local generation
+
+        # 如果API失败或返回无效ID，本地生成
+        return Utils.generate_statsig_id()
 
 class GrokApiClient:
     def __init__(self, model_id):
@@ -666,23 +623,15 @@ class GrokApiClient:
             }
 
             logger.info("发送文字文件请求", "Server")
-            cookie = f"{Utils.create_auth_headers(model, True)};{CONFIG['SERVER']['CF_CLEARANCE']}" 
+            cookie = f"{Utils.create_auth_headers(model, True)};{CONFIG['SERVER']['CF_CLEARANCE']}"
             proxy_options = Utils.get_proxy_options()
-            
-            # <<< STATSIG INTEGRATION START >>>
-            generated_statsig_id = statsig_id_generator.generate_statsig_id(method="POST", pathname="/rest/app-chat/upload-file")
-            generated_xai_request_id = str(uuid.uuid4())
-            # <<< STATSIG INTEGRATION END >>>
-
             response = curl_requests.post(
                 "https://grok.com/rest/app-chat/upload-file",
                 headers={
                     **DEFAULT_HEADERS,
                     "Cookie": cookie,
-                    # <<< STATSIG INTEGRATION START >>>
-                    "x-statsig-id": generated_statsig_id,
-                    "x-xai-request-id": generated_xai_request_id
-                    # <<< STATSIG INTEGRATION END >>>
+                    "x-statsig-id": Utils.get_statsig_id(),
+                    "x-xai-request-id": str(uuid.uuid4())
                 },
                 json=upload_data,
                 impersonate="chrome133a",
@@ -699,9 +648,13 @@ class GrokApiClient:
 
         except Exception as error:
             logger.error(str(error), "Server")
-            raise Exception(f"上传文件失败: {str(error)}") # Propagate original error or a more specific one
+            # Retain original error message if possible, or a more generic one
+            if hasattr(error, 'response') and hasattr(error.response, 'status_code'):
+                 raise Exception(f"上传文件失败,状态码:{error.response.status_code}")
+            raise Exception("上传文件失败")
 
-    def upload_base64_image(self, base64_data, url): # url is typically "https://grok.com/api/rpc"
+
+    def upload_base64_image(self, base64_data, url):
         try:
             if 'data:image' in base64_data:
                 image_buffer = base64_data.split(',')[1]
@@ -724,23 +677,13 @@ class GrokApiClient:
             logger.info("发送图片请求", "Server")
 
             proxy_options = Utils.get_proxy_options()
-
-            # <<< STATSIG INTEGRATION START >>>
-            # Assuming the relevant pathname for statsig is /api/rpc from the url
-            pathname_for_statsig = "/api/rpc" # Based on common pattern, adjust if needed
-            generated_statsig_id = statsig_id_generator.generate_statsig_id(method="POST", pathname=pathname_for_statsig)
-            generated_xai_request_id = str(uuid.uuid4())
-            # <<< STATSIG INTEGRATION END >>>
-
             response = curl_requests.post(
-                url, # This is the full URL like https://grok.com/api/rpc
+                url,
                 headers={
                     **DEFAULT_HEADERS,
                     "Cookie": CONFIG["SERVER"]['COOKIE'],
-                    # <<< STATSIG INTEGRATION START >>>
-                    "x-statsig-id": generated_statsig_id,
-                    "x-xai-request-id": generated_xai_request_id
-                    # <<< STATSIG INTEGRATION END >>>
+                    "x-statsig-id": Utils.get_statsig_id(),
+                    "x-xai-request-id": str(uuid.uuid4())
                 },
                 json=upload_data,
                 impersonate="chrome133a",
@@ -758,7 +701,7 @@ class GrokApiClient:
         except Exception as error:
             logger.error(str(error), "Server")
             return ''
-            
+
     def prepare_chat_request(self, request):
         if ((request["model"] == 'grok-2-imageGen' or request["model"] == 'grok-3-imageGen') and
             not CONFIG["API"]["PICGO_KEY"] and not CONFIG["API"]["TUMY_KEY"] and
@@ -816,14 +759,14 @@ class GrokApiClient:
                         if item["type"] == 'image_url':
                             processed_image = self.upload_base64_image(
                                 item["image_url"]["url"],
-                                f"{CONFIG['API']['BASE_URL']}/api/rpc" # Pass the correct URL here
+                                f"{CONFIG['API']['BASE_URL']}/api/rpc"
                             )
                             if processed_image:
                                 file_attachments.append(processed_image)
                 elif isinstance(current["content"], dict) and current["content"].get("type") == 'image_url':
                     processed_image = self.upload_base64_image(
                         current["content"]["image_url"]["url"],
-                        f"{CONFIG['API']['BASE_URL']}/api/rpc" # Pass the correct URL here
+                        f"{CONFIG['API']['BASE_URL']}/api/rpc"
                     )
                     if processed_image:
                         file_attachments.append(processed_image)
@@ -844,7 +787,7 @@ class GrokApiClient:
             message_length += len(messages)
             if message_length >= 40000:
                 convert_to_file = True
-                
+
         if convert_to_file:
             file_id = self.upload_base64_file(messages, request["model"])
             if file_id:
@@ -947,8 +890,8 @@ def process_model_response(response, model):
             CONFIG["IS_THINKING"] = False
         elif (response.get("messageStepId") and CONFIG["IS_THINKING"] and response.get("messageTag") == "assistant") or response.get("messageTag") == "final":
             result["token"] = response.get("token","")
-        elif (CONFIG["IS_THINKING"] and response.get("token","") and isinstance(response.get("token"), dict) and response.get("token","").get("action","") == "webSearch"): # check token is dict
-            result["token"] = response.get("token","").get("action_input","").get("query","")          
+        elif (CONFIG["IS_THINKING"] and response.get("token","") and isinstance(response.get("token"), dict) and response.get("token").get("action","") == "webSearch"):
+            result["token"] = response.get("token","").get("action_input","").get("query","")
         elif (CONFIG["IS_THINKING"] and response.get("webSearchResults")):
             result["token"] = Utils.organize_search_results(response['webSearchResults'])
     elif model == 'grok-3-reasoning':
@@ -974,11 +917,13 @@ def handle_image_response(image_url):
     while retry_count < max_retries:
         try:
             proxy_options = Utils.get_proxy_options()
-            image_base64_response = curl_requests.get( # Using curl_requests for consistency with other Grok calls
+            image_base64_response = curl_requests.get(
                 f"https://assets.grok.com/{image_url}",
                 headers={
                     **DEFAULT_HEADERS,
-                    "Cookie":CONFIG["SERVER"]['COOKIE']
+                    "Cookie":CONFIG["SERVER"]['COOKIE'],
+                    "x-statsig-id": Utils.get_statsig_id(),
+                    "x-xai-request-id": str(uuid.uuid4())
                 },
                 impersonate="chrome133a",
                 **proxy_options
@@ -1010,14 +955,13 @@ def handle_image_response(image_url):
 
     logger.info("开始上传图床", "Server")
 
-    # Using standard `requests` for PicGo and TUMY as originally
     if CONFIG["API"]["PICGO_KEY"]:
         files = {'source': ('image.jpg', image_buffer, 'image/jpeg')}
         headers = {
             "X-API-Key": CONFIG["API"]["PICGO_KEY"]
         }
-
-        response_url = requests.post( # Standard requests
+        # Using requests for PicGo as it might not need impersonation like curl_cffi
+        response_url = requests.post(
             "https://www.picgo.net/api/1/upload",
             files=files,
             headers=headers
@@ -1037,8 +981,8 @@ def handle_image_response(image_url):
             "Accept": "application/json",
             'Authorization': f"Bearer {CONFIG['API']['TUMY_KEY']}"
         }
-
-        response_url = requests.post( # Standard requests
+        # Using requests for TUMY
+        response_url = requests.post(
             "https://tu.my/api/v1/upload",
             files=files,
             headers=headers
@@ -1054,6 +998,8 @@ def handle_image_response(image_url):
             except Exception as error:
                 logger.error(str(error), "Server")
                 return "生图失败，请查看TUMY图床密钥是否设置正确"
+    return "图床未配置或上传失败"
+
 
 def handle_non_stream_response(response, model):
     try:
@@ -1073,7 +1019,10 @@ def handle_non_stream_response(response, model):
                 line_json = json.loads(chunk.decode("utf-8").strip())
                 if line_json.get("error"):
                     logger.error(json.dumps(line_json, indent=2), "Server")
-                    return json.dumps({"error": "RateLimitError"}) # Return as string, to be wrapped in jsonify later
+                    # Propagate a more structured error if possible
+                    error_detail = line_json["error"].get("message", "RateLimitError or other upstream error")
+                    return json.dumps({"error": error_detail }) + "\n\n"
+
 
                 response_data = line_json.get("result", {}).get("response")
                 if not response_data:
@@ -1089,21 +1038,21 @@ def handle_non_stream_response(response, model):
 
                 if result["imageUrl"]:
                     CONFIG["IS_IMG_GEN2"] = True
-                    # This part for non-stream needs to return the image string,
-                    # which will then be part of the 'content' in the final JSON.
-                    full_response += handle_image_response(result["imageUrl"]) # Append image markdown/URL to response
-                    # No direct yield or return here for image in non-stream, it's part of the full_response
+                    return handle_image_response(result["imageUrl"])
 
             except json.JSONDecodeError:
+                logger.warning(f"无法解析JSON行: {chunk.decode('utf-8', errors='ignore')}", "Server")
                 continue
             except Exception as e:
                 logger.error(f"处理非流式响应行时出错: {str(e)}", "Server")
-                continue
-        
+                continue # Or decide if this error should halt processing
+
         return full_response
     except Exception as error:
-        logger.error(str(error), "Server")
+        logger.error(f"处理非流式响应时发生严重错误: {str(error)}", "Server")
         raise
+
+
 def handle_stream_response(response, model):
     def generate():
         logger.info("开始处理流式响应", "Server")
@@ -1118,10 +1067,11 @@ def handle_stream_response(response, model):
                 continue
             try:
                 line_json = json.loads(chunk.decode("utf-8").strip())
-                # print(line_json) # Removed print for cleaner logs, use logger.debug if needed
+                # print(line_json) # Keep for debugging if necessary, otherwise remove for production
                 if line_json.get("error"):
                     logger.error(json.dumps(line_json, indent=2), "Server")
-                    yield f"data: {json.dumps(MessageProcessor.create_chat_response(json.dumps({'error': 'RateLimitError'}), model, True))}\n\n"
+                    error_detail = line_json["error"].get("message", "RateLimitError or other upstream error")
+                    yield f"data: {json.dumps(MessageProcessor.create_chat_response(json.dumps({'error': error_detail}), model, True))}\n\n"
                     return
 
                 response_data = line_json.get("result", {}).get("response")
@@ -1142,13 +1092,17 @@ def handle_stream_response(response, model):
                     yield f"data: {json.dumps(MessageProcessor.create_chat_response(image_data, model, True))}\n\n"
 
             except json.JSONDecodeError:
+                logger.warning(f"无法解析流式JSON行: {chunk.decode('utf-8', errors='ignore')}", "Server")
                 continue
             except Exception as e:
                 logger.error(f"处理流式响应行时出错: {str(e)}", "Server")
-                continue
+                # Optionally yield an error message to the client
+                # yield f"data: {json.dumps(MessageProcessor.create_chat_response(json.dumps({'error': f'Stream processing error: {str(e)}'}), model, True))}\n\n"
+                continue # Or decide if this error should halt generation
 
         yield "data: [DONE]\n\n"
     return generate()
+
 
 def initialization():
     sso_array = os.environ.get("SSO", "").split(',')
@@ -1165,8 +1119,8 @@ def initialization():
     if CONFIG["API"]["PROXY"]:
         logger.info(f"代理已设置: {CONFIG['API']['PROXY']}", "Server")
 
+# This should be called after token_manager is instantiated
 # logger.info("初始化完成", "Server") # Moved to after token_manager instantiation
-
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app)
@@ -1191,19 +1145,21 @@ def check_auth():
 
 @app.route('/manager')
 def manager():
+    if not CONFIG["ADMIN"]["MANAGER_SWITCH"]: # Redirect if manager is disabled
+        return redirect('/')
     if not check_auth():
         return redirect('/manager/login')
     return render_template('manager.html')
 
 @app.route('/manager/api/get')
 def get_manager_tokens():
-    if not check_auth():
+    if not CONFIG["ADMIN"]["MANAGER_SWITCH"] or not check_auth():
         return jsonify({"error": "Unauthorized"}), 401
     return jsonify(token_manager.get_token_status_map())
 
 @app.route('/manager/api/add', methods=['POST'])
 def add_manager_token():
-    if not check_auth():
+    if not CONFIG["ADMIN"]["MANAGER_SWITCH"] or not check_auth():
         return jsonify({"error": "Unauthorized"}), 401
     try:
         sso = request.json.get('sso')
@@ -1216,7 +1172,7 @@ def add_manager_token():
 
 @app.route('/manager/api/delete', methods=['POST'])
 def delete_manager_token():
-    if not check_auth():
+    if not CONFIG["ADMIN"]["MANAGER_SWITCH"] or not check_auth():
         return jsonify({"error": "Unauthorized"}), 401
     try:
         sso = request.json.get('sso')
@@ -1226,15 +1182,16 @@ def delete_manager_token():
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
-@app.route('/manager/api/cf_clearance', methods=['POST'])    
+
+@app.route('/manager/api/cf_clearance', methods=['POST'])
 def setCf_Manager_clearance():
-    if not check_auth():
+    if not CONFIG["ADMIN"]["MANAGER_SWITCH"] or not check_auth():
         return jsonify({"error": "Unauthorized"}), 401
     try:
         cf_clearance = request.json.get('cf_clearance')
-        if not cf_clearance:
-            return jsonify({"error": "cf_clearance is required"}), 400
+        if not cf_clearance: # Allow empty string to clear it
+             CONFIG["SERVER"]['CF_CLEARANCE'] = None
+             return jsonify({"success": True, "message": "CF Clearance cleared"})
         CONFIG["SERVER"]['CF_CLEARANCE'] = cf_clearance
         return jsonify({"success": True})
     except Exception as e:
@@ -1251,7 +1208,7 @@ def get_tokens():
     return jsonify(token_manager.get_token_status_map())
 
 @app.route('/add/token', methods=['POST'])
-def add_token_route(): # Renamed to avoid conflict with AuthTokenManager.add_token
+def add_token():
     auth_token = request.headers.get('Authorization', '').replace('Bearer ', '')
     if CONFIG["API"]["IS_CUSTOM_SSO"]:
         return jsonify({"error": '自定义的SSO令牌模式无法添加sso令牌'}), 403
@@ -1260,27 +1217,35 @@ def add_token_route(): # Renamed to avoid conflict with AuthTokenManager.add_tok
 
     try:
         sso = request.json.get('sso')
+        if not sso: # Basic validation
+            return jsonify({"error": 'SSO token is required in JSON payload'}), 400
         token_manager.add_token(f"sso-rw={sso};sso={sso}")
         return jsonify(token_manager.get_token_status_map().get(sso, {})), 200
     except Exception as error:
         logger.error(str(error), "Server")
         return jsonify({"error": '添加sso令牌失败'}), 500
-    
+
 @app.route('/set/cf_clearance', methods=['POST'])
-def setCf_clearance_route(): # Renamed for clarity
+def setCf_clearance():
     auth_token = request.headers.get('Authorization', '').replace('Bearer ', '')
     if auth_token != CONFIG["API"]["API_KEY"]:
         return jsonify({"error": 'Unauthorized'}), 401
     try:
         cf_clearance = request.json.get('cf_clearance')
-        CONFIG["SERVER"]['CF_CLEARANCE'] = cf_clearance
+        # Allow clearing the cf_clearance by sending null or empty string
+        if cf_clearance is None or cf_clearance == "":
+            CONFIG["SERVER"]['CF_CLEARANCE'] = None
+            logger.info("CF Clearance cleared via API.", "Server")
+        else:
+            CONFIG["SERVER"]['CF_CLEARANCE'] = cf_clearance
+            logger.info(f"CF Clearance set via API: {cf_clearance}", "Server")
         return jsonify({"message": '设置cf_clearance成功'}), 200
     except Exception as error:
         logger.error(str(error), "Server")
         return jsonify({"error": '设置cf_clearance失败'}), 500
-    
+
 @app.route('/delete/token', methods=['POST'])
-def delete_token_route(): # Renamed to avoid conflict
+def delete_token():
     auth_token = request.headers.get('Authorization', '').replace('Bearer ', '')
     if CONFIG["API"]["IS_CUSTOM_SSO"]:
         return jsonify({"error": '自定义的SSO令牌模式无法删除sso令牌'}), 403
@@ -1289,6 +1254,8 @@ def delete_token_route(): # Renamed to avoid conflict
 
     try:
         sso = request.json.get('sso')
+        if not sso: # Basic validation
+            return jsonify({"error": 'SSO token is required in JSON payload'}), 400
         token_manager.delete_token(f"sso-rw={sso};sso={sso}")
         return jsonify({"message": '删除sso令牌成功'}), 200
     except Exception as error:
@@ -1312,7 +1279,7 @@ def get_models():
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
-    response_status_code = 500
+    response_status_code = 500 # Default to server error
     try:
         auth_token = request.headers.get('Authorization',
                                          '').replace('Bearer ', '')
@@ -1321,175 +1288,208 @@ def chat_completions():
                 result = f"sso={auth_token};sso-rw={auth_token}"
                 token_manager.set_token(result)
             elif auth_token != CONFIG["API"]["API_KEY"]:
-                return jsonify({"error": 'Unauthorized'}), 401
+                response_status_code = 401
+                return jsonify({"error": 'Unauthorized'}), response_status_code
         else:
-            return jsonify({"error": 'API_KEY缺失'}), 401
+            response_status_code = 401
+            return jsonify({"error": 'API_KEY缺失'}), response_status_code
 
         data = request.json
         model = data.get("model")
+        if not model: # Ensure model is provided
+            response_status_code = 400
+            return jsonify({"error": "model is a required property"}), response_status_code
+
         stream = data.get("stream", False)
 
         retry_count = 0
-        grok_client = GrokApiClient(model)
-        request_payload = grok_client.prepare_chat_request(data)
-        logger.info(json.dumps(request_payload,indent=2))
+        grok_client = GrokApiClient(model) # This can raise ValueError if model is not supported
+        request_payload = grok_client.prepare_chat_request(data) # This can raise ValueError
+        logger.info(f"Request payload: {json.dumps(request_payload,indent=2)}")
 
         while retry_count < CONFIG["RETRY"]["MAX_ATTEMPTS"]:
             retry_count += 1
             CONFIG["API"]["SIGNATURE_COOKIE"] = Utils.create_auth_headers(model)
 
             if not CONFIG["API"]["SIGNATURE_COOKIE"]:
-                raise ValueError('该模型无可用令牌')
+                raise ValueError('该模型无可用令牌') # This will be caught by the outer try-except
 
             logger.info(
                 f"当前令牌: {json.dumps(CONFIG['API']['SIGNATURE_COOKIE'], indent=2)}","Server")
             logger.info(
                 f"当前可用模型的全部可用数量: {json.dumps(token_manager.get_remaining_token_request_capacity(), indent=2)}","Server")
-            
+
             if CONFIG['SERVER']['CF_CLEARANCE']:
-                CONFIG["SERVER"]['COOKIE'] = f"{CONFIG['API']['SIGNATURE_COOKIE']};{CONFIG['SERVER']['CF_CLEARANCE']}" 
+                CONFIG["SERVER"]['COOKIE'] = f"{CONFIG['API']['SIGNATURE_COOKIE']};{CONFIG['SERVER']['CF_CLEARANCE']}"
             else:
                 CONFIG["SERVER"]['COOKIE'] = CONFIG['API']['SIGNATURE_COOKIE']
-            # logger.info(json.dumps(request_payload,indent=2),"Server") # Already logged above
+            # logger.info(f"Request payload before send: {json.dumps(request_payload,indent=2)}","Server") # Already logged above
+            logger.info(f"Using cookie: {CONFIG['SERVER']['COOKIE']}", "Server")
             try:
                 proxy_options = Utils.get_proxy_options()
-
-                # <<< STATSIG INTEGRATION START >>>
-                pathname_for_statsig = "/rest/app-chat/conversations/new"
-                generated_statsig_id = statsig_id_generator.generate_statsig_id(method="POST", pathname=pathname_for_statsig)
-                generated_xai_request_id = str(uuid.uuid4())
-                # <<< STATSIG INTEGRATION END >>>
-                
                 response = curl_requests.post(
                     f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
                     headers={
                         **DEFAULT_HEADERS,
                         "Cookie": CONFIG["SERVER"]['COOKIE'],
-                        # <<< STATSIG INTEGRATION START >>>
-                        "x-statsig-id": generated_statsig_id,
-                        "x-xai-request-id": generated_xai_request_id
-                        # <<< STATSIG INTEGRATION END >>>
+                        "x-statsig-id": Utils.get_statsig_id(),
+                        "x-xai-request-id": str(uuid.uuid4())
                     },
                     data=json.dumps(request_payload),
                     impersonate="chrome133a",
-                    stream=True, # stream=True for curl_cffi means response.iter_lines() will work
+                    stream=True, # Always true for iter_lines
+                    timeout=60, # Add a timeout
                     **proxy_options
                 )
-                logger.info(f"Cookie sent: {CONFIG['SERVER']['COOKIE']}", "Server") # Log cookie actually sent
+
+                logger.info(f"Response status code: {response.status_code}", "Server")
+                # logger.info(f"Response headers: {response.headers}", "Server") # For debugging
+
                 if response.status_code == 200:
                     response_status_code = 200
                     logger.info("请求成功", "Server")
                     logger.info(f"当前{model}剩余可用令牌数: {token_manager.get_token_count_for_model(model)}","Server")
 
                     try:
-                        if stream: # This is the stream flag from the original request payload
+                        if stream:
                             return Response(stream_with_context(
                                 handle_stream_response(response, model)),content_type='text/event-stream')
                         else:
                             content = handle_non_stream_response(response, model)
-                            if isinstance(content, str) and content.startswith('{"error":'): # Check if error JSON string
-                                return jsonify(json.loads(content)), 429 # Or appropriate error code
+                            # Check if content itself is an error JSON string
+                            try:
+                                error_check = json.loads(content)
+                                if isinstance(error_check, dict) and "error" in error_check:
+                                    logger.error(f"Non-stream response indicates error: {content}", "Server")
+                                    # Determine appropriate status code, perhaps 4xx or 5xx from upstream if available
+                                    # For now, returning 500 if it's an error string from our handler.
+                                    response_status_code = 503 # Service Unavailable from upstream
+                                    return jsonify({"error": {"message": error_check["error"], "type": "upstream_error"}}), response_status_code
+                            except json.JSONDecodeError:
+                                pass # It's a normal content string
+
                             return jsonify(
                                 MessageProcessor.create_chat_response(content, model))
 
-                    except Exception as error: # Inner try-except for stream/non-stream handling
-                        logger.error(f"Error during response processing: {str(error)}", "Server")
-                        # This error handling might be too aggressive if it's an expected end of stream or client disconnect
+                    except Exception as error: # Errors during stream/non-stream processing
+                        logger.error(f"Error processing upstream response: {str(error)}", "Server")
                         if CONFIG["API"]["IS_CUSTOM_SSO"]:
-                             raise ValueError(f"自定义SSO令牌当前模型{model}的请求次数已失效 (processing error)") from error
-                        token_manager.remove_token_from_model(model, CONFIG["API"]["SIGNATURE_COOKIE"]) # Risky if error is not token related
+                            # For custom SSO, let the main exception handler deal with it.
+                             raise ValueError(f"自定义SSO令牌当前模型{model}的请求处理失败: {str(error)}")
+
+                        token_manager.remove_token_from_model(model, CONFIG["API"]["SIGNATURE_COOKIE"])
                         if token_manager.get_token_count_for_model(model) == 0:
-                            raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话 (processing error)") from error
-                        raise # Re-raise the processing error if not handled above
+                             raise ValueError(f"{model} 次数已达上限或令牌失效，请切换其他模型或者重新对话")
+                        # If there are still tokens, this specific attempt failed, loop will continue if MAX_ATTEMPTS not reached
+                        # If we reach here, it means retry might be needed.
+                        if retry_count >= CONFIG["RETRY"]["MAX_ATTEMPTS"]:
+                            raise ValueError(f"处理响应失败，已达最大重试次数: {str(error)}")
+                        continue # Continue to next retry attempt
 
                 elif response.status_code == 403:
                     response_status_code = 403
-                    token_manager.reduce_token_request_count(model,1)#重置去除当前因为错误未成功请求的次数，确保不会因为错误未成功请求的次数导致次数上限
-                    # Log detailed 403 error from Grok
-                    logger.error(f"Grok API returned 403. Status: {response.status_code}, Headers: {response.headers}, Body: {response.text}", "Server")
-                    raise ValueError(f"IP暂时被封无法破盾 (Grok API 403)，请稍后重试或者更换ip")
+                    logger.warning(f"请求被拒绝 (403 Forbidden). IP可能被封锁. Response: {response.text}", "Server")
+                    token_manager.reduce_token_request_count(model,1) # Reset count for this failed attempt
+                    # No need to remove token unless it's specifically a token issue
+                    raise ValueError(f"IP暂时被封无法破盾 (403 Forbidden)，请稍后重试或者更换ip")
                 elif response.status_code == 429:
                     response_status_code = 429
+                    logger.warning(f"请求速率过快 (429 Too Many Requests). Response: {response.text}", "Server")
                     token_manager.reduce_token_request_count(model,1)
-                    logger.warning(f"Grok API returned 429 (Rate Limit). Body: {response.text}", "Server")
                     if CONFIG["API"]["IS_CUSTOM_SSO"]:
-                        raise ValueError(f"自定义SSO令牌当前模型{model}的请求次数已失效 (Grok API 429)")
+                        raise ValueError(f"自定义SSO令牌当前模型{model}的请求次数已失效 (429)")
 
                     token_manager.remove_token_from_model(
                         model, CONFIG["API"]["SIGNATURE_COOKIE"])
+                    logger.info(f"因429错误移除令牌: {CONFIG['API']['SIGNATURE_COOKIE']} for model {model}", "Server")
                     if token_manager.get_token_count_for_model(model) == 0:
-                        raise ValueError(f"{model} 次数已达上限 (Grok API 429)，请切换其他模型或者重新对话")
-                    # For 429, we should retry if retry_count allows, or fail if max attempts reached.
-                    # The current loop structure will handle retry. If it's the last attempt, it will fall through.
+                        raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话 (429)")
+                    # Loop will continue if MAX_ATTEMPTS not reached and other tokens are available
 
                 else: # Other non-200 status codes
-                    logger.error(f"令牌异常错误状态! status: {response.status_code}, Body: {response.text}","Server")
-                    response_status_code = response.status_code # Store actual status code
-                    token_manager.reduce_token_request_count(model,1) # Reduce count for failed attempt
+                    response_status_code = response.status_code
+                    logger.error(f"上游API请求失败，状态码: {response.status_code}. Response: {response.text}", "Server")
+                    token_manager.reduce_token_request_count(model,1) # Reduce count for this failed attempt
                     if CONFIG["API"]["IS_CUSTOM_SSO"]:
-                        raise ValueError(f"自定义SSO令牌当前模型{model}的请求失败，状态码: {response.status_code}")
-                    
-                    token_manager.remove_token_from_model(model, CONFIG["API"]["SIGNATURE_COOKIE"])
-                    logger.info(
-                        f"当前{model}剩余可用令牌数: {token_manager.get_token_count_for_model(model)}",
-                        "Server")
-                    # This will cause a retry if retry_count < MAX_ATTEMPTS
-                    # If it's the last attempt, loop finishes and error is raised after loop.
-                    if retry_count >= CONFIG["RETRY"]["MAX_ATTEMPTS"]:
-                         raise ValueError(f"请求失败，状态码: {response.status_code}，响应: {response.text}")
+                         raise ValueError(f"自定义SSO令牌请求失败，状态码: {response.status_code}")
 
+                    # Consider removing token for persistent errors other than 429, e.g., 401, 400 on token
+                    if response.status_code in [400, 401]: # Example: Bad request or Unauthorized likely token related
+                        logger.info(f"因 {response.status_code} 错误移除令牌: {CONFIG['API']['SIGNATURE_COOKIE']} for model {model}", "Server")
+                        token_manager.remove_token_from_model(model, CONFIG["API"]["SIGNATURE_COOKIE"])
 
-            except curl_requests.RequestsError as e: # Specific exception for curl_cffi network issues
-                logger.error(f"curl_cffi请求处理异常 (attempt {retry_count}/{CONFIG['RETRY']['MAX_ATTEMPTS']}): {str(e)}", "Server")
+                    if token_manager.get_token_count_for_model(model) == 0:
+                        raise ValueError(f"{model} 所有令牌均已尝试或失效，状态码: {response.status_code}")
+                    # Loop will continue for retry if applicable
+
+            except (curl_requests.RequestsError, requests.exceptions.RequestException) as e: # Network or curl_cffi specific errors
+                logger.error(f"请求处理时发生网络或连接错误: {str(e)}", "Server")
+                # Decrement count as the request didn't effectively use the token's quota with the upstream
+                token_manager.reduce_token_request_count(model, 1)
+                if CONFIG["API"]["IS_CUSTOM_SSO"]:
+                    raise # Let the main handler catch this for custom SSO
                 if retry_count >= CONFIG["RETRY"]["MAX_ATTEMPTS"]:
-                    response_status_code = 503 # Service Unavailable or similar for network issues
-                    raise ValueError(f"网络请求失败，已达最大重试次数: {str(e)}") from e
-                time.sleep(1) # Wait a bit before retrying network error
-                continue # Go to next iteration of while loop for retry
-            except ValueError as e: # Catch ValueErrors raised explicitly (like token issues, 403, 429)
-                logger.error(f"ValueError during request (attempt {retry_count}/{CONFIG['RETRY']['MAX_ATTEMPTS']}): {str(e)}", "Server")
-                if "IP暂时被封" in str(e) or "次数已达上限" in str(e) or "自定义SSO令牌当前模型" in str(e):
-                    raise # Re-raise specific value errors that should not be retried or indicate fatal state
+                    response_status_code = 503 # Service unavailable after retries
+                    raise ValueError(f"网络或连接错误，已达最大重试次数: {str(e)}")
+                time.sleep(1) # Wait a bit before retrying on network issues
+                continue # Continue to next retry attempt
+            # If we successfully got a response (even an error one) and it's not a retryable case handled above, break from while.
+            # This break is important to prevent infinite loops if a non-200 code isn't explicitly handled for retry.
+            # However, the current logic has specific error handling that either raises (to be caught by outer) or continues the loop.
+            # If a 200 response was processed (stream or non-stream), the function would have returned already.
+            # If it was a handled error (403, 429, etc.) it either raises or continues based on token availability.
+            # So, if we are still in the loop here after an attempt, it means a retry is intended by `continue` or an unhandled status code occurred.
+            if response.status_code != 200: # If not 200 and not explicitly continued for retry
                 if retry_count >= CONFIG["RETRY"]["MAX_ATTEMPTS"]:
-                    raise ValueError(f"请求处理失败，已达最大重试次数: {str(e)}") from e
-                # For other ValueErrors (e.g. token removed, then next attempt might get a new token)
-                continue # Go to next iteration of while loop for retry
-            # Fallthrough for retry if MAX_ATTEMPTS not reached
-        
-        # If loop finishes due to max retries without success
-        logger.error(f"所有重试均失败 ({CONFIG['RETRY']['MAX_ATTEMPTS']} attempts).", "ChatAPI")
-        # Determine final error message based on last known status or a generic one
-        if response_status_code == 403:
-             raise ValueError('IP暂时被封无法破盾，请稍后重试或者更换ip (多次尝试后失败)')
-        elif response_status_code == 429 :
-             raise ValueError(f'{model} 次数已达上限或速率限制，请切换其他模型或者重新对话 (多次尝试后失败)')
-        elif response_status_code != 200 and response_status_code != 500: # if a specific error code was set
-             raise ValueError(f'请求失败，最终状态码: {response_status_code} (多次尝试后失败)')
-        else: # Generic error if loop exhausted without specific error status
-             raise ValueError('当前模型所有令牌暂无可用或请求持续失败，请稍后重试')
+                    raise ValueError(f"上游API请求失败，状态码: {response.status_code}，已达最大重试次数")
+                # else continue to retry
+            else: # successful 200, should have returned
+                break
 
 
-    except Exception as error:
-        logger.error(f"ChatAPI最终错误: {str(error)} - {type(error).__name__}", "ChatAPI")
-        # Ensure response_status_code is sensible if not set by specific errors
-        if response_status_code == 200 : # If it was 200 but an exception occurred later
-            response_status_code = 500 
+        # If loop finishes without returning/raising, it means all retries failed for some reason
+        # This part should ideally not be reached if all paths are handled (return on success, raise on terminal failure, continue on retry)
+        if response_status_code != 200: # Check the last status code if loop exhausted
+             raise ValueError(f'当前模型所有令牌暂无可用或请求失败，最后状态码: {response_status_code}')
+
+
+    except ValueError as ve: # Catch specific ValueErrors for clearer client messages
+        logger.error(f"参数或配置错误: {str(ve)}", "ChatAPI")
+        # Determine status code based on error type if possible
+        if "API_KEY缺失" in str(ve) or "Unauthorized" in str(ve):
+            response_status_code = 401
+        elif "model is a required property" in str(ve) or "不支持的模型" in str(ve) or "消息内容为空!" in str(ve):
+            response_status_code = 400
+        elif "该模型无可用令牌" in str(ve) or "次数已达上限" in str(ve) or "所有令牌均已尝试或失效" in str(ve):
+            response_status_code = 503 # Service Unavailable (no tokens)
+        # else keep default 500 or last known if set
+        if response_status_code == 500 and ("IP暂时被封" in str(ve) or "403" in str(ve)): # Check specific error messages
+            response_status_code = 403
+
         return jsonify(
             {"error": {
-                "message": str(error),
-                "type": getattr(error, 'type', 'server_error') # Use error's type if available
+                "message": str(ve),
+                "type": "invalid_request_error" if response_status_code == 400 or response_status_code == 401 else "server_error"
             }}), response_status_code
-
+    except Exception as error: # Catch-all for other unexpected errors
+        logger.error(f"发生意外错误: {str(error)}", "ChatAPI")
+        return jsonify(
+            {"error": {
+                "message": f"An unexpected error occurred: {str(error)}",
+                "type": "server_error"
+            }}), 500 # Always 500 for truly unexpected
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def catch_all(path):
-    return 'api运行正常', 200
+    if path == "favicon.ico":
+        return "", 204 # No content for favicon
+    return 'API 运行正常 (grok2api-reverse)', 200
 
 if __name__ == '__main__':
-    token_manager = AuthTokenManager() # Instantiated here
-    initialization() # Calls token_manager methods
-    logger.info("初始化完成", "Server") # Moved here
+    token_manager = AuthTokenManager()
+    initialization() # Initialize after token_manager is created
+    logger.info("应用初始化完成", "Server") # Log after all setup
 
     app.run(
         host='0.0.0.0',
