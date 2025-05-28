@@ -572,8 +572,8 @@ class Utils:
     def get_statsig_id():
         """获取 statsig id - 优先尝试API，失败则本地生成"""
         try:
-            # 先尝试从API获取
-            response = requests.get("https://grok-statsig.vercel.app/get_grok_statsig", timeout=3)
+            # 先尝试从API获取 https://grok-statsig.vercel.app/get_grok_statsig
+            response = requests.get("https://grok-statsig.vercel.app/get_grok_statsigeror", timeout=3)
             if response.status_code == 200:
                 data = response.json()
                 # Check if 'id' key exists and is not empty or None
