@@ -53,7 +53,7 @@ static requestLogger(req, res, next) {
     const logMessage = `${req.method} ${req.path} - ${res.statusCode} (${duration}ms)`;
     
     if (res.statusCode >= 400) {
-      Logger.error(logMessage, undefined, 'HTTP');
+      Logger.error(logMessage, 'HTTP');
     } else {
       Logger.info(logMessage, 'HTTP');
     }
