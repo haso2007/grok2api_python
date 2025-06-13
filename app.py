@@ -467,6 +467,12 @@ class AuthTokenManager:
         return self.token_status_map
 
 class Utils:
+    # 添加新的类属性
+    key = None
+    animation_key = None
+    random_keyword = "bird"
+    random_number = 42
+
     @staticmethod
     def organize_search_results(search_results):
         if not search_results or 'results' not in search_results:
@@ -505,58 +511,63 @@ class Utils:
         return proxy_options
 
     @staticmethod
+    def base64_encode(data):
+        """Base64编码"""
+        import base64
+        return base64.b64encode(data).decode('utf-8')
+
+    @staticmethod
+    def get_key(home_page_response=None):
+        """获取key值"""
+        # 生成一个固定的key值，可以根据需要修改
+        return "default_key_value"
+
+    @staticmethod
+    def get_key_bytes(key):
+        """将key转换为字节数组"""
+        return list(key.encode('utf-8')[:8])  # 取前8个字节
+
+    @staticmethod
+    def get_animation_key(key_bytes=None, home_page_response=None):
+        """获取animation key"""
+        # 生成一个固定的animation key，可以根据需要修改
+        return "default_animation_key"
+
+    @staticmethod
+    def generate_transaction_id(method="POST", path="/rest/app-chat/conversations/new", home_page_response=None, key=None, animation_key=None, time_now=None):
+        """生成符合格式的 x-statsig-id（使用新算法）"""
+        import hashlib
+        import random
+        import time
+        import math
+        
+        # 类属性设置
+        random_keyword = "bird"
+        random_number = 42
+        
+        time_now = time_now or math.floor(
+            (time.time() * 1000 - 1682924400 * 1000) / 1000)
+        time_now_bytes = [(time_now >> (i * 8)) & 0xFF for i in range(4)]
+        key = key or Utils.get_key(home_page_response=home_page_response)
+        key_bytes = Utils.get_key_bytes(key=key)
+        animation_key = animation_key or Utils.get_animation_key(
+            key_bytes=key_bytes, home_page_response=home_page_response)
+        
+        hash_val = hashlib.sha256(
+            f"{method}!{path}!{time_now}{random_keyword}{animation_key}".encode()).digest()
+        hash_bytes = list(hash_val)
+        random_num = random.randint(0, 255)
+        bytes_arr = [*key_bytes, *time_now_bytes, *
+                     hash_bytes[:16], random_number]
+        out = bytearray(
+            [random_num, *[item ^ random_num for item in bytes_arr]])
+        return Utils.base64_encode(out).strip("=")
+
+    @staticmethod
     def generate_statsig_id():
         """生成符合格式的 x-statsig-id"""
         try:
-            # 1. 生成48字节的meta content
-            meta_templates = [
-                bytes.fromhex("30902da2569a6aa4b92bae5a1fb941ac30791cb9130dda57476bb7646d15a263dbfc84103acb2644c83e4ddb2451734d"),
-                bytes.fromhex("40a02db3679b7bb5ca3cbf6b2fca52bd41892dca241eeb68587cc8757e26b374ecfd95214bdc3755d94f5eec3562845e"),
-                bytes.fromhex("50b03ec4789c8cc6db4dc07c3fdb63ce52993edb352ffc79698dd9868f37c485fdfea6325ced4866ea5f6ffd4673956f") # Corrected hex string
-            ]
-
-            # 随机选择一个模板或生成新的
-            if random.random() < 0.7:  # 70%的概率使用模板
-                meta_content = random.choice(meta_templates)
-            else:
-                # 生成随机的48字节
-                meta_content = bytes([random.randint(0, 255) for _ in range(48)])
-
-            # 2. 生成时间戳（4字节）
-            current_timestamp = int(time.time())
-            relative_timestamp = current_timestamp - 1682924400
-            timestamp_bytes = struct.pack('<I', relative_timestamp)  # 小端序
-
-            # 3. 生成SHA256片段（16字节）
-            # 模拟指纹信息的哈希
-            fingerprint_data = f"POST!/rest/app-chat/conversations/new!{relative_timestamp}"
-            fingerprint_data += "screen:2560x1440,platform:MacIntel,language:zh-CN"
-            hash_obj = hashlib.sha256(fingerprint_data.encode('utf-8'))
-            hash_bytes = hash_obj.digest()[:16]
-
-            # 4. 固定值（1字节）
-            fixed_byte = b'\x03'
-
-            # 5. 组合所有部分（69字节）
-            combined = meta_content + timestamp_bytes + hash_bytes + fixed_byte
-
-            # 6. 生成随机异或密钥（1字节）
-            xor_key = random.randint(0x10, 0xF0)
-
-            # 7. 异或加密
-            encrypted = bytes([b ^ xor_key for b in combined])
-
-            # 8. 添加密钥到开头（总共70字节）
-            final_data = bytes([xor_key]) + encrypted
-
-            # 9. Base64编码
-            statsig_id = base64.b64encode(final_data).decode('utf-8')
-
-            # 移除padding（如果有）
-            statsig_id = statsig_id.rstrip('=')
-
-            return statsig_id
-
+            return Utils.generate_transaction_id()
         except Exception as e:
             logger.error(f"生成 statsig id 时发生错误: {str(e)}", "Utils")
             # 返回一个已知有效的ID作为后备
@@ -572,12 +583,12 @@ class Utils:
     def get_statsig_id():
         """获取 statsig id - 优先尝试API，失败则本地生成"""
         try:
-            # 先尝试从API获取 https://grok-statsig.vercel.app/get_grok_statsig
-            response = requests.get("https://grok-statsig.vercel.app/get_grok_statsig", timeout=3)
+            # 先尝试从API获取 https://rui.soundai.ee/x.php
+            response = requests.get("https://rui.soundai.ee/x.php", timeout=3)
             if response.status_code == 200:
                 data = response.json()
-                # Check if 'id' key exists and is not empty or None
-                statsig_id_from_api = data.get("id")
+                # Check if 'x_statsig_id' key exists and is not empty or None
+                statsig_id_from_api = data.get("x_statsig_id")
                 if statsig_id_from_api: 
                     return statsig_id_from_api
         except Exception as e: # Catch specific exceptions if possible, e.g., requests.exceptions.RequestException
